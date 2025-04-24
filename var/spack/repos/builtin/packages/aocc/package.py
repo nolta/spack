@@ -66,6 +66,8 @@ class Aocc(Package, LlvmDetection, CompilerPackage):
 
     depends_on("c", type="build")
     depends_on("cxx", type="build")
+    depends_on("fortran", type="build")
+    depends_on("patchelf@:0.17", type="build")
 
     depends_on("libxml2")
     depends_on("zlib-api")
@@ -115,6 +117,51 @@ class Aocc(Package, LlvmDetection, CompilerPackage):
             for compiler in ["clang", "clang++"]:
                 with open(join_path(self.prefix.bin, "{}.cfg".format(compiler)), "w") as f:
                     f.write(compiler_options)
+
+        # flang requires libquadmath.so.0, but:
+        #   - flang.cfg is ignored
+        if self._need_gcc_libquadmath_fix():
+            # flang.cfg is ignored, so replace the flang symlink with a wrapper script
+            clang = join_path(self.prefix.bin, "clang")
+            flang = join_path(self.prefix.bin, "flang")
+            assert os.path.islink(flang)
+            os.unlink(flang)
+            with open(flang, "x") as f:
+                f.write(f'#!/bin/sh\nexec -a "$0" "{clang}" {compiler_options} "$@"\n')
+            set_executable(flang)
+
+            # help flang{1,2} find libquadmath.so.0
+            libdir = self._libquadmath_dir()
+            if libdir is not None:
+                patchelf = which("patchelf")
+                patchelf.add_default_arg("--set-rpath", libdir)
+                patchelf(join_path(self.prefix.bin, "flang1"))
+                patchelf(join_path(self.prefix.bin, "flang2"))
+
+    def _need_gcc_libquadmath_fix(self):
+        # we assume this problem will be fixed in AOCC v6.0
+        return self.spec.satisfies("@:5 %gcc") and self.compiler.prefix != "/usr"
+
+    def _libquadmath_dir(self):
+        for lib in ["lib64", "lib"]:
+            libdir = join_path(self.compiler.prefix, lib)
+            if os.path.exists(join_path(libdir, "libquadmath.so.0")):
+                return libdir
+        return None
+
+    def _setup_env(self, env):
+        if self._need_gcc_libquadmath_fix():
+            libdir = self._libquadmath_dir()
+            if libdir is not None:
+                env.prepend_path("LD_LIBRARY_PATH", libdir)
+
+    def setup_run_environment(self, env):
+        super().setup_run_environment(env)
+        self._setup_env(env)
+
+    def setup_dependent_build_environment(self, env, dependent_spec):
+        super().setup_dependent_build_environment(env, dependent_spec)
+        self._setup_env(env)
 
     def _cc_path(self):
         return os.path.join(self.spec.prefix.bin, "clang")
